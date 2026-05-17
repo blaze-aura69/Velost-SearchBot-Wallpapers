@@ -2,10 +2,9 @@ import aiohttp, asyncio, json, os, time
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from huggingface_hub import HfApi
-import urllib.robotparser
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-DATASET_REPO = "blaze-aura69/Wallpapers"
+DATASET_REPO = "blazeaura69/Wallpapers"
 TARGET_FILE = "wallpapers.jsonl"
 
 MAX_URLS = 1_000_000
@@ -13,48 +12,48 @@ MAX_RUNTIME = 4 * 3600  # 4 hours
 CONCURRENCY = 200       # tune for 4 vCPU
 
 seen = set()
-results = {}
-robots_cache = {}
-
-def can_fetch(url, user_agent="*"):
-    domain = urlparse(url).netloc
-    if domain not in robots_cache:
-        rp = urllib.robotparser.RobotFileParser()
-        rp.set_url(f"https://{domain}/robots.txt")
-        try:
-            rp.read()
-        except Exception:
-            return False  # if robots.txt not accessible, be safe
-        robots_cache[domain] = rp
-    return robots_cache[domain].can_fetch(user_agent, url)
+results = []
 
 async def fetch(session, url):
-    if not can_fetch(url):
-        return
     try:
         async with session.get(url, timeout=20) as resp:
-            if resp.status != 200 or "text/html" not in resp.headers.get("content-type",""):
+            if resp.status != 200:
                 return
             html = await resp.text()
             soup = BeautifulSoup(html, "html.parser")
 
-            title = soup.title.string.strip() if soup.title else ""
-            domain = urlparse(url).netloc
-            domain_url = f"https://{domain}"
-            favicon = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
-            source_name = domain.split(".")[0]
+            # Extract images
+            for img in soup.find_all("img"):
+                src = img.get("src") or img.get("data-src")
+                if not src or src in seen:
+                    continue
 
-            entry = {
-                "url": url,
-                "title": title,
-                "favicon": favicon,
-                "source_name": source_name,
-                "domain_url": domain_url
-            }
+                # Try to get dimensions if available
+                w = int(img.get("width")) if img.get("width") and img.get("width").isdigit() else None
+                h = int(img.get("height")) if img.get("height") and img.get("height").isdigit() else None
 
-            if url not in seen:
-                seen.add(url)
-                results[url] = entry
+                # Aspect ratio filter ~9:16
+                if w and h:
+                    ratio = w / h
+                    if abs(ratio - (9/16)) > 0.05:
+                        continue
+
+                domain = urlparse(url).netloc
+                domain_url = f"https://{domain}"
+                favicon = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
+                source_name = domain.split(".")[0]
+                title = soup.title.string.strip() if soup.title else ""
+
+                entry = {
+                    "url": src,
+                    "title": title,
+                    "favicon": favicon,
+                    "source_name": source_name,
+                    "domain_url": domain_url
+                }
+
+                seen.add(src)
+                results.append(entry)
 
     except Exception:
         return
@@ -82,7 +81,7 @@ def write_jsonl_prepend(entries, filename):
         with open(filename, "r") as f:
             old_lines = f.readlines()
     with open(filename, "w") as f:
-        for e in list(entries.values())[::-1]:  # newest first
+        for e in entries[::-1]:  # newest first
             f.write(json.dumps(e) + "\n")
         f.writelines(old_lines)
 
@@ -97,10 +96,14 @@ def upload_to_hf(filename):
     )
 
 if __name__ == "__main__":
-    # Replace with your own discovery logic or seed list
+    # Seeds focused on nature & animals
     seeds = [
-        "https://wallhaven.cc/waterfall",
-        "https://unsplash.com/nature",
+        "https://unsplash.com/wallpapers/nature",
+        "https://unsplash.com/wallpapers/animals",
+        "https://www.pexels.com/search/nature%20wallpaper/",
+        "https://www.pexels.com/search/animal%20wallpaper/",
+        "https://pixabay.com/images/search/nature%20wallpaper/",
+        "https://pixabay.com/images/search/animal%20wallpaper/"
     ]
     asyncio.run(crawl(seeds))
     write_jsonl_prepend(results, TARGET_FILE)
