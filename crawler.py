@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 from huggingface_hub import HfApi
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-DATASET_REPO = "blazeaura69/Wallpapers"
+DATASET_REPO = "blaze-aura69/Wallpapers"
 TARGET_FILE = "wallpapers.jsonl"
 
 MAX_URLS = 1_000_000
