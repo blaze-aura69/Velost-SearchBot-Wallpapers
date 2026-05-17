@@ -1,14 +1,14 @@
 name: Daily Crawler
 
 on:
-  workflow_dispatch:   # manual trigger
+  workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"   # run once daily at 00:00 UTC
 
 jobs:
   run-crawler:
     runs-on: ubuntu-latest
-    timeout-minutes: 270  # 4.5 hours max
+    timeout-minutes: 270
     steps:
       - uses: actions/checkout@v3
       - name: Set up Python
@@ -16,7 +16,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium
       - name: Run crawler
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
