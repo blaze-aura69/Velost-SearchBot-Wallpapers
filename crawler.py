@@ -9,18 +9,20 @@ TARGET_FILE = "wallpapers.jsonl"
 
 MAX_URLS = 1_000_000
 MAX_RUNTIME = 4 * 3600  # 4 hours
-CONCURRENCY = 10        # browsers are heavier, keep lower concurrency
+CONCURRENCY = 5         # browsers are heavier, keep concurrency lower
 
 seen = set()
 results = []
 
 async def process_page(page, url, queue):
     try:
+        print(f"[FETCH] Visiting {url}")
         await page.goto(url, timeout=30000)
-        html = await page.content()
+        title = await page.title()
 
         # Extract images
         imgs = await page.query_selector_all("img")
+        print(f"[INFO] Found {len(imgs)} <img> tags on {url}")
         for img in imgs:
             src = await img.get_attribute("src")
             if not src or src in seen:
@@ -30,7 +32,6 @@ async def process_page(page, url, queue):
             domain_url = f"https://{domain}"
             favicon = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
             source_name = domain.split(".")[0]
-            title = await page.title()
 
             entry = {
                 "url": src,
@@ -42,17 +43,22 @@ async def process_page(page, url, queue):
 
             seen.add(src)
             results.append(entry)
+            if len(results) % 100 == 0:
+                print(f"[IMAGE] Collected {len(results)} images so far")
 
         # Discover links
         links = await page.query_selector_all("a")
+        print(f"[INFO] Found {len(links)} links on {url}")
         for a in links:
             href = await a.get_attribute("href")
             if href:
                 link = urljoin(url, href)
                 if link.startswith("http") and link not in seen:
                     await queue.put(link)
+                    print(f"[QUEUE] Added {link}")
 
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Failed {url}: {e}")
         return
 
 async def crawl(seed_urls):
@@ -63,6 +69,7 @@ async def crawl(seed_urls):
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
+
         async def worker():
             while True:
                 if len(results) >= MAX_URLS or (time.time() - start) > MAX_RUNTIME:
@@ -86,6 +93,7 @@ async def crawl(seed_urls):
         await browser.close()
 
 def write_jsonl_prepend(entries, filename):
+    print(f"[WRITE] Writing {len(entries)} entries to {filename}")
     old_lines = []
     if os.path.exists(filename):
         with open(filename, "r") as f:
@@ -96,6 +104,7 @@ def write_jsonl_prepend(entries, filename):
         f.writelines(old_lines)
 
 def upload_to_hf(filename):
+    print(f"[UPLOAD] Uploading {filename} to Hugging Face dataset {DATASET_REPO}")
     api = HfApi()
     api.upload_file(
         path_or_fileobj=filename,
@@ -104,6 +113,7 @@ def upload_to_hf(filename):
         repo_type="dataset",
         token=HF_TOKEN,
     )
+    print("[UPLOAD] Completed")
 
 if __name__ == "__main__":
     seeds = [
@@ -117,3 +127,4 @@ if __name__ == "__main__":
     asyncio.run(crawl(seeds))
     write_jsonl_prepend(results, TARGET_FILE)
     upload_to_hf(TARGET_FILE)
+    print("[DONE] Crawler finished")
