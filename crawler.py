@@ -1,10 +1,7 @@
-import aiohttp, asyncio, json, os, time
-from bs4 import BeautifulSoup
+import asyncio, json, os, time
 from urllib.parse import urlparse, urljoin
 from huggingface_hub import HfApi
-from PIL import Image
-import requests
-from io import BytesIO
+from playwright.async_api import async_playwright
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 DATASET_REPO = "blaze-aura69/Wallpapers"
@@ -12,57 +9,47 @@ TARGET_FILE = "wallpapers.jsonl"
 
 MAX_URLS = 1_000_000
 MAX_RUNTIME = 4 * 3600  # 4 hours
-CONCURRENCY = 200
+CONCURRENCY = 10        # browsers are heavier, keep lower concurrency
 
-seen_urls = set()
+seen = set()
 results = []
 
-async def fetch(session, url, queue):
+async def process_page(page, url, queue):
     try:
-        async with session.get(url, timeout=20) as resp:
-            if resp.status != 200 or "text/html" not in resp.headers.get("content-type",""):
-                return
-            html = await resp.text()
-            soup = BeautifulSoup(html, "html.parser")
+        await page.goto(url, timeout=30000)
+        html = await page.content()
 
-            # Extract images
-            for img in soup.find_all("img"):
-                src = img.get("src") or img.get("data-src")
-                if not src or src in seen_urls:
-                    continue
+        # Extract images
+        imgs = await page.query_selector_all("img")
+        for img in imgs:
+            src = await img.get_attribute("src")
+            if not src or src in seen:
+                continue
 
-                # Try to check aspect ratio
-                try:
-                    r = requests.get(src, timeout=10)
-                    im = Image.open(BytesIO(r.content))
-                    w, h = im.size
-                    ratio = w / h
-                    if abs(ratio - (9/16)) > 0.05:
-                        continue
-                except Exception:
-                    continue
+            domain = urlparse(url).netloc
+            domain_url = f"https://{domain}"
+            favicon = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
+            source_name = domain.split(".")[0]
+            title = await page.title()
 
-                domain = urlparse(url).netloc
-                domain_url = f"https://{domain}"
-                favicon = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
-                source_name = domain.split(".")[0]
-                title = soup.title.string.strip() if soup.title else ""
+            entry = {
+                "url": src,
+                "title": title,
+                "favicon": favicon,
+                "source_name": source_name,
+                "domain_url": domain_url
+            }
 
-                entry = {
-                    "url": src,
-                    "title": title,
-                    "favicon": favicon,
-                    "source_name": source_name,
-                    "domain_url": domain_url
-                }
+            seen.add(src)
+            results.append(entry)
 
-                seen_urls.add(src)
-                results.append(entry)
-
-            # Discover new links
-            for a in soup.find_all("a", href=True):
-                link = urljoin(url, a["href"])
-                if link not in seen_urls and link.startswith("http"):
+        # Discover links
+        links = await page.query_selector_all("a")
+        for a in links:
+            href = await a.get_attribute("href")
+            if href:
+                link = urljoin(url, href)
+                if link.startswith("http") and link not in seen:
                     await queue.put(link)
 
     except Exception:
@@ -74,9 +61,8 @@ async def crawl(seed_urls):
     for u in seed_urls:
         await queue.put(u)
 
-    async with aiohttp.ClientSession() as session:
-        sem = asyncio.Semaphore(CONCURRENCY)
-
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
         async def worker():
             while True:
                 if len(results) >= MAX_URLS or (time.time() - start) > MAX_RUNTIME:
@@ -85,17 +71,19 @@ async def crawl(seed_urls):
                     url = await queue.get()
                 except Exception:
                     return
-                if url in seen_urls:
+                if url in seen:
                     continue
-                seen_urls.add(url)
-                async with sem:
-                    await fetch(session, url, queue)
+                seen.add(url)
+                page = await browser.new_page()
+                await process_page(page, url, queue)
+                await page.close()
                 queue.task_done()
 
         tasks = [asyncio.create_task(worker()) for _ in range(CONCURRENCY)]
         await queue.join()
         for t in tasks:
             t.cancel()
+        await browser.close()
 
 def write_jsonl_prepend(entries, filename):
     old_lines = []
@@ -103,7 +91,7 @@ def write_jsonl_prepend(entries, filename):
         with open(filename, "r") as f:
             old_lines = f.readlines()
     with open(filename, "w") as f:
-        for e in entries[::-1]:  # newest first
+        for e in entries[::-1]:
             f.write(json.dumps(e) + "\n")
         f.writelines(old_lines)
 
