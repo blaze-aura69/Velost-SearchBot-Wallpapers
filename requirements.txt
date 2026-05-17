@@ -1,5 +1,2 @@
-aiohttp
-beautifulsoup4
+playwright
 huggingface_hub
-pillow
-requests
